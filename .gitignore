@@ -1,0 +1,14 @@
+# .NET build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+TestResults/
+*.log
+*.db
+*.DS_Store
+# Publish output
+NasaApodWallpaper/publish/
