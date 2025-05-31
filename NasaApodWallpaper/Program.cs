@@ -35,29 +35,37 @@ namespace NasaApodWallpaper
         // Your NASA API key is read from environment variables
         private static readonly string? ApiKey = Environment.GetEnvironmentVariable("NASA_API_KEY");
 
+        // Reuse HTTP client for efficiency
+        private static readonly HttpClient httpClient = new HttpClient();
+
         static async Task Main(string[] args)
         {
             try
             {
-                // Check if API key is set
+                // Early validation
                 if (string.IsNullOrWhiteSpace(ApiKey))
                 {
-                    LogMessage("NASA API key not found. Please set the NASA_API_KEY environment variable.");
+                    LogMessage("NASA API key not found. Set NASA_API_KEY environment variable.");
                     return;
                 }
 
-                // Process command line arguments
+                // Handle command line args early
                 if (args.Length > 0)
                 {
-                    if (args[0].Equals("--schedule", StringComparison.OrdinalIgnoreCase))
+                    switch (args[0].ToLowerInvariant())
                     {
-                        ScheduleTask();
-                        return;
-                    }
-                    else if (args[0].Equals("--help", StringComparison.OrdinalIgnoreCase))
-                    {
-                        ShowHelp();
-                        return;
+                        case "--schedule":
+                            ScheduleTask();
+                            return;
+                        case "--help":
+                            ShowHelp();
+                            return;
+                        case "--force":
+                            // Skip date check and force update
+                            break;
+                        default:
+                            ShowHelp();
+                            return;
                     }
                 }
 
@@ -68,13 +76,13 @@ namespace NasaApodWallpaper
                 LogMessage("NASA APOD Wallpaper Changer started");
 
                 // Load configuration
-                var config = LoadConfig();
+                var config = await LoadConfigAsync();
                 string today = DateTime.Now.ToString("yyyy-MM-dd");
 
-                // Check if already updated today
-                if (config.LastUpdate == today)
+                // Skip if already updated today (unless forced)
+                if (config.LastUpdate == today && !args.Contains("--force"))
                 {
-                    LogMessage($"Already updated wallpaper today ({today}). Skipping.");
+                    LogMessage($"Already updated today ({today}). Use --force to override.");
                     return;
                 }
 
@@ -107,51 +115,44 @@ namespace NasaApodWallpaper
                     fileExtension = ".jpg";
 
                 string imagePath = Path.Combine(ImagesPath, $"NASA_APOD_{today}{fileExtension}");
-                string bmpPath = Path.Combine(ImagesPath, $"NASA_APOD_{today}.bmp");
 
                 // Download image
                 if (await DownloadImageAsync(imageUrl, imagePath))
                 {
-                    LogMessage($"Downloaded image. Checking if file exists: {File.Exists(imagePath)}");
-                    // Convert to BMP for wallpaper compatibility
-                    try
+                    LogMessage($"Downloaded image: {imagePath}");
+                    
+                    // Try setting wallpaper directly first (works with modern Windows)
+                    LogMessage($"Attempting to set wallpaper using: {imagePath}");
+                    bool wallpaperResult = SetWallpaper(imagePath);
+                    
+                    if (!wallpaperResult)
                     {
-                        if (OperatingSystem.IsWindows())
+                        // Fallback to BMP conversion if direct setting fails
+                        LogMessage("Direct wallpaper setting failed, converting to BMP...");
+                        string bmpPath = Path.Combine(ImagesPath, $"NASA_APOD_{today}.bmp");
+                        if (ConvertToBmp(imagePath, bmpPath))
                         {
-#pragma warning disable CA1416 // Validate platform compatibility
-                            using (var img = Image.FromFile(imagePath))
+                            wallpaperResult = SetWallpaper(bmpPath);
+                            if (wallpaperResult)
                             {
-                                img.Save(bmpPath, ImageFormat.Bmp);
+                                imagePath = bmpPath; // Update path for config
                             }
-#pragma warning restore CA1416 // Validate platform compatibility
-                            LogMessage($"Image converted to BMP: {bmpPath}, Exists: {File.Exists(bmpPath)}");
-                        }
-                        else
-                        {
-                            LogMessage("Image conversion to BMP is only supported on Windows.");
-                            return;
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        LogMessage($"Failed to convert image to BMP: {ex.Message}");
-                        return;
-                    }
-
-                    // Set as wallpaper using BMP
-                    LogMessage($"Attempting to set wallpaper using: {bmpPath}");
-                    bool wallpaperResult = SetWallpaper(bmpPath);
-                    LogMessage($"SetWallpaper returned: {wallpaperResult}");
+                    
                     if (wallpaperResult)
                     {
                         // Update config
                         config.LastUpdate = today;
-                        config.LastImage = bmpPath;
-                        SaveConfig(config);
+                        config.LastImage = imagePath;
+                        await SaveConfigAsync(config);
 
                         // Log info
                         LogMessage($"Today's APOD: {apodData?.Title ?? "Unknown Title"}");
-                        LogMessage($"Wallpaper successfully set to {bmpPath}");
+                        LogMessage($"Wallpaper successfully set: {imagePath}");
+
+                        // Cleanup old images
+                        CleanupOldImages();
                     }
                     else
                     {
@@ -167,6 +168,60 @@ namespace NasaApodWallpaper
             {
                 LogMessage($"Error: {ex.Message}");
             }
+            finally
+            {
+                httpClient.Dispose();
+            }
+        }
+
+        private static bool ConvertToBmp(string sourcePath, string bmpPath)
+        {
+            try
+            {
+                if (OperatingSystem.IsWindows())
+                {
+#pragma warning disable CA1416 // Validate platform compatibility
+                    using (var img = Image.FromFile(sourcePath))
+                    {
+                        img.Save(bmpPath, ImageFormat.Bmp);
+                    }
+#pragma warning restore CA1416 // Validate platform compatibility
+                    LogMessage($"Image converted to BMP: {bmpPath}");
+                    return true;
+                }
+                else
+                {
+                    LogMessage("Image conversion to BMP is only supported on Windows.");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"Failed to convert image to BMP: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static void CleanupOldImages()
+        {
+            try
+            {
+                var cutoffDate = DateTime.Now.AddDays(-7); // Keep only last 7 days
+                var files = Directory.GetFiles(ImagesPath, "NASA_APOD_*.*");
+                
+                foreach (var file in files)
+                {
+                    if (File.GetCreationTime(file) < cutoffDate)
+                    {
+                        File.Delete(file);
+                        LogMessage($"Deleted old image: {Path.GetFileName(file)}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"Error during cleanup: {ex.Message}");
+            }
         }
 
         private static void ShowHelp()
@@ -177,6 +232,7 @@ namespace NasaApodWallpaper
             Console.WriteLine("Usage:");
             Console.WriteLine("  NasaApodWallpaper.exe              - Update wallpaper now");
             Console.WriteLine("  NasaApodWallpaper.exe --schedule   - Schedule daily updates");
+            Console.WriteLine("  NasaApodWallpaper.exe --force      - Force update (ignore today check)");
             Console.WriteLine("  NasaApodWallpaper.exe --help       - Show this help message");
             Console.WriteLine();
             Console.WriteLine("This program sets your desktop wallpaper to NASA's");
@@ -189,7 +245,6 @@ namespace NasaApodWallpaper
             {
                 Console.WriteLine("Setting up scheduled task to run daily at 9:00 AM...");
 
-                // Replace the problematic line with the following:
                 string exePath = Environment.ProcessPath ?? throw new InvalidOperationException("Process path is not available.");
                 string taskName = "NasaApodWallpaper";
 
@@ -245,14 +300,10 @@ namespace NasaApodWallpaper
         {
             try
             {
-                using (var client = new HttpClient())
-                {
-                    string url = $"https://api.nasa.gov/planetary/apod?api_key={ApiKey}";
-                    var response = await client.GetStringAsync(url);
-                    LogMessage($"Raw APOD API response: {response}");
-                    // Use source-generated serializer
-                    return JsonSerializer.Deserialize(response, AppJsonContext.Default.ApodData);
-                }
+                string url = $"https://api.nasa.gov/planetary/apod?api_key={ApiKey}";
+                var response = await httpClient.GetStringAsync(url);
+                LogMessage($"Raw APOD API response: {response}");
+                return JsonSerializer.Deserialize(response, AppJsonContext.Default.ApodData);
             }
             catch (Exception ex)
             {
@@ -265,16 +316,19 @@ namespace NasaApodWallpaper
         {
             try
             {
-                using (var client = new HttpClient())
+                // Check if file already exists and is recent
+                if (File.Exists(filePath) && File.GetCreationTime(filePath).Date == DateTime.Today)
                 {
-                    var response = await client.GetAsync(url);
-                    response.EnsureSuccessStatusCode();
-
-                    using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
-                    {
-                        await response.Content.CopyToAsync(fileStream);
-                    }
+                    LogMessage($"Image already exists for today: {filePath}");
+                    return true;
                 }
+
+                var response = await httpClient.GetAsync(url);
+                response.EnsureSuccessStatusCode();
+
+                await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+                await response.Content.CopyToAsync(fileStream);
+                
                 LogMessage($"Image downloaded to {filePath}");
                 return true;
             }
@@ -324,29 +378,26 @@ namespace NasaApodWallpaper
             }
         }
 
-        private static Config LoadConfig()
+        private static async Task<Config> LoadConfigAsync()
         {
-            if (File.Exists(ConfigPath))
+            if (!File.Exists(ConfigPath))
+                return new Config();
+
+            try
             {
-                try
-                {
-                    string json = File.ReadAllText(ConfigPath);
-                    // Use source-generated serializer
-                    return JsonSerializer.Deserialize(json, AppJsonContext.Default.Config) ?? new Config();
-                }
-                catch
-                {
-                    return new Config();
-                }
+                await using var stream = new FileStream(ConfigPath, FileMode.Open, FileAccess.Read);
+                return await JsonSerializer.DeserializeAsync(stream, AppJsonContext.Default.Config) ?? new Config();
             }
-            return new Config();
+            catch
+            {
+                return new Config();
+            }
         }
 
-        private static void SaveConfig(Config config)
+        private static async Task SaveConfigAsync(Config config)
         {
-            // Use source-generated serializer
-            string json = JsonSerializer.Serialize(config, AppJsonContext.Default.Config);
-            File.WriteAllText(ConfigPath, json);
+            await using var stream = new FileStream(ConfigPath, FileMode.Create, FileAccess.Write);
+            await JsonSerializer.SerializeAsync(stream, config, AppJsonContext.Default.Config);
         }
 
         private static void LogMessage(string message)
