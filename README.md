@@ -1,5 +1,7 @@
 # NASA APOD Wallpaper Changer
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Jaskejaske1/NasaApodWallpaper)
+
 This Windows application automatically sets your desktop wallpaper to NASA's Astronomy Picture of the Day (APOD).
 
 ## Features
